@@ -40,8 +40,8 @@ import Firebase
                 // Не отрисовываем, если получили пуш от Firebase
                 if userInfo.object(forKey: "gcm.message_id") != nil {
                     channel?.invokeMethod("Messaging#onMessage", arguments: mapRemoteMessageUserInfo(toMap: userInfo))
-                    completionHandler([])
                 }
+                completionHandler([])
                 
             }
         }
@@ -55,7 +55,7 @@ import Firebase
             let request = response.notification.request
             let userInfo = request.content.userInfo as NSDictionary
             if userInfo.object(forKey: "gcm.message_id") != nil {
-                
+                // TODO: реализовать по аналогии с Firebase https://github.com/firebase/flutterfire/blob/master/packages/firebase_messaging/firebase_messaging/ios/Classes/FLTFirebaseMessagingPlugin.m
             }
             else {
                 // передача данных с клика по пушу во Flutter
