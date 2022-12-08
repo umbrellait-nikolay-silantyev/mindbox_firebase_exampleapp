@@ -1,32 +1,81 @@
+
 import UIKit
-import mindbox_ios
+import Flutter
 import Mindbox
+import MindboxNotifications
+import mindbox_ios
 import Firebase
 
 @UIApplicationMain
-
-@objc class AppDelegate: MindboxFlutterAppDelegate {
-    
-    private var channel: FlutterMethodChannel?
+@objc class AppDelegate: FlutterAppDelegate {
     
     override func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
         GeneratedPluginRegistrant.register(with: self)
-        let controller : FlutterViewController = window?.rootViewController as! FlutterViewController
-        channel = FlutterMethodChannel(name: "plugins.flutter.io/firebase_messaging",
-                                       binaryMessenger: controller.binaryMessenger)
+        if #available(iOS 10.0, *) {
+            UNUserNotificationCenter.current().delegate = self
+        }
+        registerForRemoteNotifications()
+        
+        // Регистрация фоновых задач для iOS выше 13
+        if #available(iOS 13.0, *) {
+            Mindbox.shared.registerBGTasks()
+        } else {
+            UIApplication.shared.setMinimumBackgroundFetchInterval(UIApplication.backgroundFetchIntervalMinimum)
+        }
+        
+        // Передача факта открытия приложения
+        Mindbox.shared.track(.launch(launchOptions))
         return super.application(application, didFinishLaunchingWithOptions: launchOptions)
     }
     
+    //    MARK: didRegisterForRemoteNotificationsWithDeviceToken
     // Передача токена APNS в SDK Mindbox и Firebase
-    override func application( _ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
-        Mindbox.shared.apnsTokenUpdate(deviceToken: deviceToken)
-        Messaging.messaging().setAPNSToken(deviceToken, type: .unknown) }
+    override func application(
+        _ application: UIApplication,
+        didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+            Mindbox.shared.apnsTokenUpdate(deviceToken: deviceToken)
+            Messaging.messaging().setAPNSToken(deviceToken, type: .unknown)
+            
+        }
+    
+    // Регистрация фоновых задач для iOS до 13
+    override func application(
+        _ application: UIApplication,
+        performFetchWithCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
+            Mindbox.shared.application(application, performFetchWithCompletionHandler: completionHandler)
+        }
+    
+    //    MARK: registerForRemoteNotifications
+    //    Функция запроса разрешения на уведомления. В комплишн блоке надо передать статус разрешения в SDK Mindbox
+    func registerForRemoteNotifications() {
+        UNUserNotificationCenter.current().delegate = self
+        DispatchQueue.main.async {
+            UIApplication.shared.registerForRemoteNotifications()
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+                print("Permission granted: \(granted)")
+                if let error = error {
+                    print("NotificationsRequestAuthorization failed with error: \(error.localizedDescription)")
+                }
+                Mindbox.shared.notificationsRequestAuthorization(granted: granted)
+            }
+        }
+    }
+    
+    override func application(
+        _ application: UIApplication,
+        continue userActivity: NSUserActivity,
+        restorationHandler: @escaping ([UIUserActivityRestoring]?) -> Void
+    ) -> Bool {
+        // Передача ссылки, если приложение открыто через universalLink
+        Mindbox.shared.track(.universalLink(userActivity))
+        return true
+    }
     
     
-    // Обработка пуша в активном состоянии
+    // Отрисовка пуша в активном приложении
     override func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification,
@@ -37,25 +86,22 @@ import Firebase
                 // Отрисовываем
                 completionHandler([.alert, .badge, .sound])
             } else {
-                // Не отрисовываем, если получили пуш от Firebase
-                if userInfo.object(forKey: "gcm.message_id") != nil {
-                    channel?.invokeMethod("Messaging#onMessage", arguments: mapRemoteMessageUserInfo(toMap: userInfo))
-                }
-                completionHandler([])
-                
+                // Не отрисовываем, передаем стандартному обработчику
+                super.userNotificationCenter(center, willPresent: notification, withCompletionHandler: completionHandler)
             }
         }
     
-    
-    // Функция обработки кликов по нотификации
-    open override func userNotificationCenter(
+    //    MARK: didReceive response
+    //    Функция обработки кликов по нотификации
+    override func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void) {
             let request = response.notification.request
             let userInfo = request.content.userInfo as NSDictionary
             if userInfo.object(forKey: "gcm.message_id") != nil {
-                // TODO: реализовать по аналогии с Firebase https://github.com/firebase/flutterfire/blob/master/packages/firebase_messaging/firebase_messaging/ios/Classes/FLTFirebaseMessagingPlugin.m
+                // Если пуш от Firebase, то вызываем стандартный обработчик
+                super.userNotificationCenter(center, didReceive: response, withCompletionHandler: completionHandler)
             }
             else {
                 // передача данных с клика по пушу во Flutter
@@ -66,184 +112,8 @@ import Firebase
                 
                 // передача факта открытия приложения по переходу на пуш
                 Mindbox.shared.track(.push(response))
+                completionHandler()
             }
-            completionHandler()
-        }
-}
-
-extension Bool {
-    var intValue: Int {
-        return self ? 1 : 0
-    }
-}
-
-func mapRemoteMessageUserInfo(toMap userInfo: NSDictionary) -> NSDictionary {
-    var message: [AnyHashable : Any] = [:]
-    var data: [AnyHashable : Any] = [:]
-    var notification: [AnyHashable : Any] = [:]
-    var notificationIOS: [AnyHashable : Any] = [:]
-    
-    // message.data
-    for key in userInfo.allKeys as! [String]  {
-        
-        // message.messageId
-        if (key == "gcm.message_id") || (key == "google.message_id") || (key == "message_id") {
-            message["messageId"] = userInfo[key]
-        }
-        
-        // message.messageType
-        if key == "message_type" {
-            message["messageType"] = userInfo[key]
-        }
-        
-        // message.collapseKey
-        if key == "collapse_key" {
-            message["collapseKey"] = userInfo[key]
-        }
-        
-        // message.from
-        if key == "from" {
-            message["from"] = userInfo[key]
-        }
-        
-        // message.sentTime
-        if key == "google.c.a.ts" {
-            message["sentTime"] = userInfo[key]
-        }
-        
-        // message.to
-        if (key == "to") || (key == "google.to") {
-            message["to"] = userInfo[key]
-        }
-        
-        // message.apple.imageUrl
-        if key == "fcm_options" {
-            if userInfo[key] != nil && (userInfo[key] as! NSDictionary)["image"] != nil {
-                notificationIOS["imageUrl"] = (userInfo[key] as! NSDictionary)["image"]
-            }
-        }
-        data[key] = userInfo[key]
-    }
-    message["data"] = data
-    
-    if userInfo["aps"] != nil {
-        let apsDict = userInfo["aps"] as! NSDictionary
-        
-        // message.category
-        if apsDict["category"] != nil {
-            message["category"] = apsDict["category"]
-        }
-        
-        // message.threadId
-        if apsDict["thread-id"] != nil {
-            message["threadId"] = apsDict["thread-id"]
-        }
-        
-        // message.contentAvailable
-        if apsDict["content-available"] != nil {
-            message["contentAvailable"] = NSNumber(value: (apsDict["content-available"]) as! Int).boolValue
-        }
-        
-        // message.mutableContent
-        if apsDict["mutable-content"] != nil && (apsDict["mutable-content"] as! Bool).intValue == 1 {
-            message["mutableContent"] = NSNumber(value: (apsDict["mutable-content"]) as! Int).boolValue
-        }
-        
-        // message.notification.*
-        if apsDict["alert"] != nil {
             
-            // can be a string or dictionary
-            if apsDict["alert"] is NSString {
-                // message.notification.title
-                notification["title"] = apsDict["alert"]
-            } else if apsDict["alert"] is [AnyHashable : Any] {
-                let apsAlertDict = apsDict["alert"] as! NSDictionary
-                
-                // message.notification.title
-                if apsAlertDict["title"] != nil {
-                    notification["title"] = apsAlertDict["title"]
-                }
-                
-                // message.notification.titleLocKey
-                if apsAlertDict["title-loc-key"] != nil {
-                    notification["titleLocKey"] = apsAlertDict["title-loc-key"]
-                }
-                
-                // message.notification.titleLocArgs
-                if apsAlertDict["title-loc-args"] != nil {
-                    notification["titleLocArgs"] = apsAlertDict["title-loc-args"]
-                }
-                
-                // message.notification.body
-                if apsAlertDict["body"] != nil {
-                    notification["body"] = apsAlertDict["body"]
-                }
-                // message.notification.bodyLocKey
-                if apsAlertDict["loc-key"] != nil {
-                    notification["bodyLocKey"] = apsAlertDict["loc-key"]
-                }
-                
-                // message.notification.bodyLocArgs
-                if apsAlertDict["loc-args"] != nil {
-                    notification["bodyLocArgs"] = apsAlertDict["loc-args"]
-                }
-                // message.notification.apple.subtitle
-                if apsAlertDict["subtitle"] != nil {
-                    notificationIOS["subtitle"] = apsAlertDict["subtitle"]
-                }
-                
-                // Apple only
-                // message.notification.apple.subtitleLocKey
-                if apsAlertDict["subtitle-loc-key"] != nil {
-                    notificationIOS["subtitleLocKey"] = apsAlertDict["subtitle-loc-key"]
-                }
-                // Apple only
-                // message.notification.apple.subtitleLocArgs
-                if apsAlertDict["subtitle-loc-args"] != nil {
-                    notificationIOS["subtitleLocArgs"] = apsAlertDict["subtitle-loc-args"]
-                }
-                
-                // Apple only
-                // message.notification.apple.badge
-                if apsAlertDict["badge"] != nil {
-                    notificationIOS["badge"] = apsAlertDict["badge"]
-                }
-            }
-            notification["apple"] = notificationIOS
-            message["notification"] = notification
         }
-        if apsDict["sound"] != nil {
-            if apsDict["sound"] is NSString {
-                // message.notification.apple.sound
-                notification["sound"] = [
-                    "name": apsDict["sound"],
-                    "critical": NSNumber(value: false),
-                    "volume": NSNumber(value: 1)
-                ]
-            } else if apsDict["sound"] is [AnyHashable : Any] {
-                let apsSoundDict = apsDict["sound"] as! NSDictionary
-                var notificationIOSSound: [AnyHashable : Any] = [:]
-                
-                // message.notification.apple.sound.name String
-                if apsSoundDict["name"] != nil {
-                    notificationIOSSound["name"] = apsSoundDict["name"]
-                }
-                
-                // message.notification.apple.sound.critical Boolean
-                if apsSoundDict["critical"] != nil {
-                    notificationIOSSound["critical"] = NSNumber(value: (apsSoundDict["critical"]) as! Int).boolValue
-                }
-                
-                // message.notification.apple.sound.volume Number
-                if apsSoundDict["volume"] != nil {
-                    notificationIOSSound["volume"] = apsSoundDict["volume"]
-                }
-                // message.notification.apple.sound
-                notificationIOS["sound"] = notificationIOSSound
-            }
-            notification["apple"] = notificationIOS
-            message["notification"] = notification
-        }
-    }
-    return message as NSDictionary
 }
